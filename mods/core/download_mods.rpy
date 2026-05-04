@@ -133,10 +133,15 @@ init python:
         def modify_surf(self, surf):
             return renpy.display.pgrender.transform_scale(surf, (220, 220))
 
+    class ModmenuPreviewImageURL(ImageURL):
+        def modify_surf(self, surf):
+            return renpy.display.pgrender.transform_scale(surf, (125, 125))
+
 
     ImageURL = Wrapper(ImageURL)
     ScaledImageURL = Wrapper(ScaledImageURL)
     ModmenuContentImageURL = Wrapper(ModmenuContentImageURL)
+    ModmenuPreviewImageURL = Wrapper(ModmenuPreviewImageURL)
 
     style.download_mods = Style(style.default)
 
@@ -523,20 +528,22 @@ screen modmenu_paged_modlist(contents, use_steam):
                 if str(modid) in modinfo.get_mod_folders():
                     $ modname = modname + "\n{size=-5}(Installed){/size}"
 
+                hbox:
+                    python:
+                        ModmenuPreviewImageURL(url)
+                    textbutton "[modname]":
+                        style "modmenu_select_btn"
 
-                textbutton "[modname]":
-                    style "modmenu_select_btn"
-
-                    action [Hide("modmenu_mod_content"),
-                            Show("modmenu_mod_content",
-                                 modid=modid,
-                                 name=unicode(name, "utf8"),
-                                 author=unicode(author, "utf8"),
-                                 description=unicode(description, "utf8"),
-                                 url=url,
-                                 use_steam=use_steam,
-                                 ),
-                            Play("audio", "se/sounds/open.ogg")]
+                        action [Hide("modmenu_mod_content"),
+                                Show("modmenu_mod_content",
+                                     modid=modid,
+                                     name=unicode(name, "utf8"),
+                                     author=unicode(author, "utf8"),
+                                     description=unicode(description, "utf8"),
+                                     url=url,
+                                     use_steam=use_steam,
+                                     ),
+                                Play("audio", "se/sounds/open.ogg")]
 
 
 
