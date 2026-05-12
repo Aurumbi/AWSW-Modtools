@@ -483,9 +483,13 @@ screen modmenu_paged(contents, use_steam):
                 sensitive (current_page < MAX_PAGE)
 
     on "show" action [Function(_refresh_modlist_page, current_page, PAGE_SIZE, contents, use_steam=use_steam),
-                      Function(_preload_mod_images, contents, None)]
+                      Function(_preload_mod_images, contents, None),
+                      Function(im.cache.clear) # I tended to get 'out of memory' errors on this menu, (as we tend to allocate many images), and this seems to completely fix that issue
+                      ]
 
-    on "hide" action [Function(mod_image_preloader.clear)]
+    on "hide" action [Function(mod_image_preloader.clear), # Cleanup after ourselves
+                      Function(im.cache.clear)
+                      ]
 
 
 
