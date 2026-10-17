@@ -531,40 +531,67 @@ init -1 python:
         """Is mod actually installed on the computer, regardless of modmenu status."""
         return str(mod_id) in modinfo.get_mod_folders() or str(mod_name) in modinfo.get_mod_folders()
 
+    def _reverse_mapping(mapping):
+        """Reverses a mapping from keys to sets of keys
 
-    def _modmenu_get_recursive_deps(dep_map, reverse_dep_map, strict=True):
+        :param mapping: mapping from keytype to iterable(valuetype), from each key to its mapping set
+        :return mapping from valuetype to set(keytype), from each value to its source keys
+        """
+        result = {}
+
+        for k, v_list in mapping.iteritems():
+            print "k={}, v_list={}".format(k, v_list)
+            for v in v_list:
+                print "v={}".format(v)
+                if v not in result:
+                    result[v] = set()
+                result[v].add(k)
+        return result
+
+
+    def _modmenu_get_recursive_deps(dep_map, reverse_dep_map=None, strict=True):
         """Generate a recursive dependency map from the simple forward and reverse dependency maps
 
         :param dep_map: mapping from mod_id to iterable(mod_id), from each mod to it's dependencies
-        :param reverse_dep_map: reverse mapping, from each mod to is users. used for efficiency
+        :param reverse_dep_map: reverse mapping, from each mod to is users. used for efficiency. If None (the default), the reversed map is generated.
         :param strict: if True (default), raise KeyError on dependencies which do not appear as keys in dep_map. if False, they are treated as mods without dependencies
         :return mapping from mod_id to set(mod_id), recursive mod mapping
         :raises KeyError when strict=True and a mod has a dependency not in the mapping
         :raises ValueError when a circular dependency is detected
         """
+        if reverse_dep_map is None:
+            reverse_dep_map = _reverse_mapping(dep_map)
+
         result = {}
         if strict:
-            unfulfilled_deps = {mod_id: set(child_list) for mod_id, child_list in dep_map.iteritems()}
+            outer_deps = set(reverse_dep_map.iterkeys()) - set(dep_map.iterkeys())
+            if outer_deps:
+                raise KeyError("Dependencies {} are not present in the dependency map".format(list(outer_deps)))
+
+            unresolved_deps = Counter({mod_id: len(child_list) for mod_id, child_list in dep_map.iteritems()})
         else:
-            checked_deps = dep_map.keys()
-            unfulfilled_deps = {mod_id: set(child_list).intersection(checked_deps) for mod_id, child_list in dep_map.iteritems()}
-        all_fulfilled = {mod_id: dep_map[mod_id] for mod_id, unfulfilled_list in unfulfilled_deps.iteritems() if not len(unfulfilled_list)}
-        unfulfilled_deps = {mod_id: child_list for mod_id, child_list in unfulfilled_deps.iteritems() if mod_id not in all_fulfilled} # remove fulfilled mods
-        while len(all_fulfilled):
-            for mod_id, child_list in all_fulfilled.iteritems():
+            present_deps = dep_map.keys()
+            unresolved_deps = Counter({mod_id: len(set(child_list).intersection(present_deps)) for mod_id, child_list in dep_map.iteritems()})
+
+        _next_all_unresolved = Counter() + unresolved_deps
+        all_resolved = unresolved_deps.most_common()[len(_next_all_unresolved):]
+        unresolved_deps = _next_all_unresolved
+        while len(all_resolved):
+            for mod_id, _ in all_resolved:
                 # add entry to dependency map
+                child_list = dep_map[mod_id]
                 if strict:
-                    recursive_deps = reduce(set.union, (dep_map[dep_id] for dep_id in child_list), set())
+                    recursive_deps = reduce(set.union, (result[dep_id] for dep_id in child_list), set())
                 else:
-                    recursive_deps = reduce(set.union, (dep_map.get(dep_id, set()) for dep_id in child_list), set())
+                    recursive_deps = reduce(set.union, (result.get(dep_id, set()) for dep_id in child_list), set())
                 result[mod_id] = set(child_list).union(recursive_deps)
 
-                # update that they're fulfilled
-                for use_id in reverse_dep_map[mod_id]:
-                    unfulfilled_deps[use_id].remove(mod_id)
+                # update that they're resolved
+                unresolved_deps.subtract(reverse_dep_map.get(mod_id, tuple()))
 
-            all_fulfilled = {mod_id: dep_map[mod_id] for mod_id, unfulfilled_list in unfulfilled_deps.iteritems() if not len(unfulfilled_list)}
-            unfulfilled_deps = {mod_id: child_list for mod_id, child_list in unfulfilled_deps.iteritems() if mod_id not in all_fulfilled}
+            _next_all_unresolved = Counter() + unresolved_deps
+            all_resolved = unresolved_deps.most_common()[len(_next_all_unresolved):]
+            unresolved_deps = _next_all_unresolved
 
 
         # all missing are circular dependencies. this should really never happen...
@@ -588,21 +615,12 @@ init -1 python:
             self._remove_map = {}
             self._installed_dependent_map = Counter() # equivalent of _dependent_add_map used to keep track when a mod is safe to delete
 
-            # setup recursive dependency maps
-            forward_dep_map = {mod_id: set(mod.child_list) for mod_id, mod in self._modlist.iteritems()}
-            reverse_dep_map = {mod_id: set() for mod_id in self._modlist}
-            for mod_id, child_list in forward_dep_map.iteritems():
-                for child_key in child_list:
-                    if child_key not in reverse_dep_map:
-                        reverse_dep_map[child_key] = set()
-                    reverse_dep_map[child_key].add(mod_id)
+            self._dependency_map = {mod_id: set(mod.child_list) for mod_id, mod in self._modlist.iteritems()}
+            self._dependency_map = _modmenu_get_recursive_deps(self._dependency_map, strict=False)
 
-            # Fixup forward_dep_map to include missing keys from reverse_dep_map as _modmenu_get_recursive_deps is annoying about them
-            missing_keys = set(reverse_dep_map.keys()) - set(forward_dep_map.keys())
-            forward_dep_map.update({key: set() for key in missing_keys})
-
-            self._dependency_map = _modmenu_get_recursive_deps(forward_dep_map, reverse_dep_map, strict=False)
-            self._r_dependency_map = _modmenu_get_recursive_deps(reverse_dep_map, forward_dep_map, strict=False)
+            # Set all valid keys
+            self._r_dependency_map = {k: set() for k in self._dependency_map.iterkeys()}
+            self._r_dependency_map.update(_reverse_mapping(self._dependency_map))
 
             self._reset_installed_dependent_map()
 
