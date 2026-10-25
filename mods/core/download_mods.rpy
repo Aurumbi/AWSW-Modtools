@@ -595,25 +595,30 @@ init -1 python:
 
 
         # all missing are circular dependencies. this should really never happen...
-        circular_deps = set(dep_map.iterkeys()) - set(result.iterkeys())
+        circular_deps = set(unresolved_deps.iterkeys())
         if circular_deps:
             raise ValueError("Circular dependency detected regarding these mods: {}".format(tuple(circular_deps)))
 
         return result
 
 
+    def _default_vendor_filename_func(mod_id, mod_name):
+        return mod_name
+
     class Modchanges:
-        def __init__(self, base_modlist):
+        def __init__(self, base_modlist, vendor_filename_func=_default_vendor_filename_func):
             """A class holding the full modlist, along with functionality to request to install or uninstall a mod.
 
-            :param base_modlist: The vendor modlist for this class
+            :param base_modlist: list[ModlistEntry], The vendor modlist for this class.
+            :param vendor_filename_func: func from (mod_id, mod_name) to str, used for removal of mods in accordance with modconfig.remove_mod rules. creates filename for that method.
             """
 
             self._modlist = {mod.id: mod for mod in base_modlist}
             self._add_map = {}
-            self._dependent_add_map = Counter()
             self._remove_map = {}
-            self._installed_dependent_map = Counter() # equivalent of _dependent_add_map used to keep track when a mod is safe to delete
+            self._requested_add_dependency_counts = Counter() # Used to forbid removals of dependencies of present mods by keeping count of them
+            self._installed_dependency_counts = Counter()
+            self._vendor_filename_func = vendor_filename_func
 
             self._dependency_map = {mod_id: set(mod.child_list) for mod_id, mod in self._modlist.iteritems()}
             self._dependency_map = _modmenu_get_recursive_deps(self._dependency_map, strict=False)
@@ -622,19 +627,22 @@ init -1 python:
             self._r_dependency_map = {k: set() for k in self._dependency_map.iterkeys()}
             self._r_dependency_map.update(_reverse_mapping(self._dependency_map))
 
-            self._reset_installed_dependent_map()
+            self._reset_installed_dependency_counts()
 
 
-        def _reset_installed_dependent_map(self):
-            self._installed_dependent_map.clear()
+        def _reset_installed_dependency_counts(self):
+            self._installed_dependency_counts.clear()
 
             for mod_id in self._modlist:
                 if self.is_mod_installed(mod_id):
-                    self._installed_dependent_map += Counter(self._dependency_map[mod_id])
+                    self._installed_dependency_counts += Counter(self._dependency_map[mod_id])
 
 
         def get_mod(self, mod_id):
             return self._modlist[mod_id]
+
+        def get_mod_name(self, mod_id):
+            return self._modlist[mod_id].name
 
         def get_mod_by_name(self, mod_name):
             result = [mod for mod in self._modlist.itervalues() if mod.name == mod_name]
@@ -652,52 +660,68 @@ init -1 python:
         def get_added_mods(self, dependency=True):
             """Get all mods selected for addition, optionally along with their uninstalled dependencies
             :param dependency: if True (default), result also includes all uninstalled dependencies of the selected mods. if False, only mods specifically added will be included
+            :return set[mod_id] of added mods
             """
-            if not dependency:
-                return self._add_map
-            result = self.get_added_dependencies(missing=True)
-            result.update(self._add_map)
+            result = set(self._add_map.iterkeys())
+            if dependency:
+                result = result.union(mod_id for mod_id in self._requested_add_dependency_counts.iterkeys() if not self.is_mod_installed(mod_id))
+            return result
+
+        def get_add_modmap(self, dependency=True):
+            """Get modconfig.apply_mod_changes add_modmap appropriate value given the mods selected for addition.
+            This will return the same modlist as self.get_added_mods, formatted in a way appropriate for use as the add_modmap parameter of the modconfig.apply_mod_changes function.
+            :param dependency: if True (default), result also includes all uninstalled dependencies of the selected mods. if False, only mods specifically added will be included
+            :return dict[mod_id: mod_name] of added mods, which can be directly used in apply_mod_changes as the add_modmap parameter
+            """
+            result = dict(self._add_map)
+            if dependency:
+                result.update(self._get_add_modmap_deps())
             return result
 
         def get_removed_mods(self, dependency=True):
             """Get all mods selected for removal, optionally depending on dependency coherence
             :param dependency: if True (default), only returns mods which have no remaining dependency after removal (whether existing or added). if False, all mods requesting removal will be returned
+            :return set[mod_id] of removed mods
             """
             if not dependency:
-                return self._remove_map
-            return {mod_id: item for mod_id, item in self._remove_map.iteritems() if self.is_mod_removable(mod_id)}
+                return set(self._remove_map.iterkeys())
+            return {mod_id for mod_id in self._remove_map.iterkeys() if self.is_mod_removable(mod_id)}
 
-        def get_added_dependencies(self, missing=False):
-            """Get all added mod dependencies.
-            :param missing: if True, only include missing (as in, not installed) dependencies. if False (default), include all dependencies
+        def get_remove_modmap(self, dependency=True):
+            """Get modconfig.apply_mod_changes remove_modmap appropriate value given the mods selected for removal.
+            This will return the same modlist as self.get_removed_mods, formatted in a way appropriate for use as the remove_modmap parameter of the modconfig.apply_mod_changes function.
+            :param dependency: if True (default), only returns mods which have no remaining dependency after removal (whether existing or added). if False, all mods requesting removal will be returned
+            :return dict[mod_name: filename] of removed mods, which can be directly used in apply_mod_changes as the remove_modmap parameter
             """
-            if missing:
-                result = {}
-                for mod_id in self._dependent_add_map.iterkeys():
-                    mod_name = self.get_mod(mod_id).name
-                    if not _modmenu_is_mod_installed(mod_id, mod_name):
-                        result[mod_id] = mod_name
-                return result
-            return {mod_id: self.get_mod(mod_id).name for mod_id in self._dependent_add_map.iterkeys()}
+            if not dependency:
+                return {mod_name: filename for mod_name, filename in self._remove_map.itervalues()}
+            return {mod_name: filename for mod_id, (mod_name, filename) in self._remove_map.iteritems() if self.is_mod_removable(mod_id)}
 
-        def get_installed_dependencies(self):
-            return {mod_id for mod_id in self._installed_dependent_map.iterkeys()}
+        def _get_add_modmap_deps(self):
+            """Get add_modmap entries for add list dependencies, avoiding already installed mods
+            :return dict[mod_id: mod_name] of added mod dependencies, in the format of the add_modmap parameter of the modconfig.apply_mod_changes function
+            """
+            result = {}
+            for mod_id in self._requested_add_dependency_counts.iterkeys():
+                mod_name = self.get_mod_name(mod_id)
+                if not _modmenu_is_mod_installed(mod_id, mod_name):
+                    result[mod_id] = mod_name
+            return result
+
+
 
 
         def is_mod_added(self, mod_id, dependency=True):
             """Is mod_id selected for addition, or optionally will be installed.
             :param dependency: if True (default), returns True if mod_id is selected or is an uninstalled dependency of a selected mod. if False, only returns True if mod_id is selected for addition
             """
-            return mod_id in self.get_added_mods(dependency)
-
-        def is_mod_dependency(self, mod_id):
-            return mod_id in self.get_added_dependencies()
+            return mod_id in self.get_added_mods(dependency=dependency)
 
         def is_mod_removed(self, mod_id, dependency=True):
             """Is mod_id selected for removal, or optionally will be removed.
             :param dependency: if True (default), returns True only if mod_id is selected and can be safely removed by dependency logic. if False, returns True if mod_id is selected for removal
             """
-            return mod_id in self.get_removed_mods(dependency)
+            return mod_id in self.get_removed_mods(dependency=dependency)
 
         def is_all_dependencies_available(self, mod_id):
             """Are all of mod_id's dependencies present in the modlist"""
@@ -717,41 +741,44 @@ init -1 python:
 
         def is_mod_removable(self, mod_id):
             """Can a mod be removed without breaking dependency constraints. this decides if a remove_mod call will produce a visible effect"""
-            return mod_id not in self._installed_dependent_map and mod_id not in self._dependent_add_map
+            return mod_id not in self._installed_dependency_counts and mod_id not in self._requested_add_dependency_counts
+
+        def is_mod_dependency(self, mod_id):
+            """Is this mod a dependency of a present mod. semantically equivalent to not self.is_mod_removable(mod_id)"""
+            return not self.is_mod_removable(mod_id)
 
 
         def add_mod(self, mod_id):
-            print "adding mod:", mod_id
+            print "adding mod: " + str(mod_id)
             is_installed = self.is_mod_installed(mod_id)
 
-            if is_installed and mod_id in self._remove_map: # Added, then removed this session
+            if is_installed and mod_id in self._remove_map: # Installed removed mod being reinstated
                 self._remove_map.pop(mod_id)
-                self._installed_dependent_map += Counter(self.get_mod_dependencies(mod_id))
+                self._installed_dependency_counts += Counter(self.get_mod_dependencies(mod_id))
             elif not is_installed and mod_id not in self._add_map: # Not added yet, and not an existing mod being reinstated
-                self._add_map[mod_id] = self.get_mod(mod_id).name
-                # filter add map to only care about mods which actually exist in the modlist
-
-                self._dependent_add_map += Counter(self.get_mod_dependencies(mod_id).intersection(self._modlist.keys()))
+                self._add_map[mod_id] = self.get_mod_name(mod_id)
+                self._requested_add_dependency_counts += Counter(self.get_mod_dependencies(mod_id).intersection(self._modlist.keys()))
             # else: nothing to do...
 
-        def remove_mod(self, mod_id, filename=""):
-            print "removing mod:", mod_id, filename
+        def remove_mod(self, mod_id):
+            print "removing mod: " + str(mod_id)
             is_installed = self.is_mod_installed(mod_id)
 
-            if not is_installed and mod_id in self._add_map:
+            if not is_installed and mod_id in self._add_map: # Added mod being removed
                 self._add_map.pop(mod_id)
-                self._dependent_add_map -= Counter(self.get_mod_dependencies(mod_id))
-            elif is_installed and mod_id not in self._remove_map:
-                self._remove_map[mod_id] = (self.get_mod(mod_id).name, filename)
-                self._installed_dependent_map -= Counter(self.get_mod_dependencies(mod_id))
+                self._requested_add_dependency_counts -= Counter(self.get_mod_dependencies(mod_id))
+            elif is_installed and mod_id not in self._remove_map: # Installed mod being removed
+                mod_name = self.get_mod_name(mod_id)
+                self._remove_map[mod_id] = (mod_name, self._vendor_filename_func(mod_id, mod_name))
+                self._installed_dependency_counts -= Counter(self.get_mod_dependencies(mod_id))
 
         def clear_added_mods(self):
             self._add_map.clear()
-            self._dependent_add_map.clear()
+            self._requested_add_dependency_counts.clear()
 
         def clear_removed_mods(self):
             self._remove_map.clear()
-            self._reset_installed_dependent_map()
+            self._reset_installed_dependency_counts()
 
         def clear_mods(self):
             self.clear_added_mods()
@@ -769,13 +796,19 @@ init -1 python:
 screen modmenu_paged(contents, use_steam):
     modal True
 
-    default mod_changes = Modchanges(contents)
+    if use_steam:
+        $ _get_modfolder = _steam_get_modfolder
+    else:
+        $ _get_modfolder = _github_get_modfolder
+
+    default mod_changes = Modchanges(contents, vendor_filename_func=_get_modfolder)
 
     python:
         filter_map = {"install": (lambda mod, mod_changes: mod_changes.is_mod_installed(mod.id), mod_changes),
                       "select":  (lambda mod, mod_changes: mod_changes.is_mod_added(mod.id, dependency=False) or mod_changes.is_mod_removed(mod.id, dependency=False), mod_changes),
                       "present": (lambda mod, mod_changes: mod_changes.is_mod_present(mod.id, dependency=True), mod_changes),
                   }
+
 
     default modlist_manager = ModscreenModlistManager(contents, filter_map=filter_map, use_steam=use_steam)
 
@@ -1058,11 +1091,6 @@ screen modmenu_paged(contents, use_steam):
 
 
 screen modmenu_paged_modlist(contents, mod_changes, use_steam):
-    if use_steam:
-        $ _get_modfolder = _steam_get_modfolder
-    else:
-        $ _get_modfolder = _github_get_modfolder
-
     frame:
         background None
         yminimum 900
@@ -1129,17 +1157,7 @@ screen modmenu_paged_modlist(contents, mod_changes, use_steam):
                 textbutton "[mod_button_text]":
                     style "modmenu_select_btn"
                     # Recolor the button if involved with add/remove/dependency lists
-                    if mod_changes.is_mod_added(mod_id, dependency=False):
-                        if not mod_changes.is_all_dependencies_available(mod_id):
-                            background "#7f7f00CF"
-                            hover_background "#ffff7fCF"
-                        else:
-                            background "#007f009B"
-                            hover_background "#7fff7f9B"
-                    elif mod_changes.is_mod_dependency(mod_id):
-                        background "#007f3f9B"
-                        hover_background "#7fffaf9B"
-                    elif mod_changes.is_mod_removed(mod_id, dependency=False):
+                    if mod_changes.is_mod_removed(mod_id, dependency=False):
                         if mod_changes.is_mod_removable(mod_id):
                             background "#7f00009B"
                             hover_background "#ff7f7f9B"
@@ -1149,6 +1167,16 @@ screen modmenu_paged_modlist(contents, mod_changes, use_steam):
                     elif mod_changes.is_mod_installed(mod_id):
                         background "#001f3f9B"
                         hover_background "#003f7f9B"
+                    elif mod_changes.is_mod_added(mod_id, dependency=False):
+                        if not mod_changes.is_all_dependencies_available(mod_id):
+                            background "#7f7f00CF"
+                            hover_background "#ffff7fCF"
+                        else:
+                            background "#007f009B"
+                            hover_background "#7fff7f9B"
+                    elif mod_changes.is_mod_dependency(mod_id):
+                        background "#007f3f9B"
+                        hover_background "#7fffaf9B"
 
 
                     action [Hide("modmenu_mod_content"),
@@ -1160,7 +1188,7 @@ screen modmenu_paged_modlist(contents, mod_changes, use_steam):
                             Play("audio", "se/sounds/open.ogg")]
 
                     alternate [If(mod_changes.is_mod_present(mod_id, dependency=False),
-                                   Function(mod_changes.remove_mod, mod_id, _get_modfolder(mod_id, mod.name)),
+                                   Function(mod_changes.remove_mod, mod_id),
                                    Function(mod_changes.add_mod, mod_id)),
                                Play("audio", "se/sounds/open.ogg")]
                               ]
@@ -1175,10 +1203,6 @@ screen modmenu_mod_content(mod, mod_changes, use_steam):
     $ description = unicode(mod.desc, "utf8")
     $ url = mod.image_url
 
-    if use_steam:
-        $ _get_modfolder = _steam_get_modfolder
-    else:
-        $ _get_modfolder = _github_get_modfolder
 
     frame:
         add "ui/modcontent_frame.png":
@@ -1242,7 +1266,7 @@ screen modmenu_mod_content(mod, mod_changes, use_steam):
                 if mod_changes.is_mod_present(mod_id, dependency=False):
                     textbutton "Uninstall":
                         ycenter 0.5
-                        action [Function(mod_changes.remove_mod, mod_id, _get_modfolder(str(mod_id), name)),
+                        action [Function(mod_changes.remove_mod, mod_id),
                                 Play("audio", "se/sounds/open.ogg")]
                         style "modmenu_content_btn"
                         text_style "modmenu_select_btn_text"
@@ -1342,7 +1366,7 @@ screen modmenu_mod_content(mod, mod_changes, use_steam):
                                             Play("audio", "se/sounds/open.ogg")]
 
                                     alternate [If(mod_changes.is_mod_present(dep_id, dependency=False),
-                                                   Function(mod_changes.remove_mod, dep_id, _get_modfolder(dep_id, mod_changes.get_mod(dep_id).name)),
+                                                   Function(mod_changes.remove_mod, dep_id),
                                                    Function(mod_changes.add_mod, dep_id)),
                                                Play("audio", "se/sounds/open.ogg")]
                                               ]
@@ -1373,7 +1397,7 @@ screen modmenu_mod_content(mod, mod_changes, use_steam):
                             python:
                                 parent_present = True
                                 try:
-                                    parent_name = mod_changes.get_mod(parent_id).name
+                                    parent_name = mod_changes.get_mod_name(parent_id)
 
                                     if mod_changes.is_mod_removed(parent_id, dependency=False):
                                         if mod_changes.is_mod_removable(parent_id):
@@ -1418,7 +1442,7 @@ screen modmenu_mod_content(mod, mod_changes, use_steam):
                                             Play("audio", "se/sounds/open.ogg")]
 
                                     alternate [If(mod_changes.is_mod_present(parent_id, dependency=False),
-                                                   Function(mod_changes.remove_mod, parent_id, _get_modfolder(parent_id, mod_changes.get_mod(parent_id).name)),
+                                                   Function(mod_changes.remove_mod, parent_id),
                                                    Function(mod_changes.add_mod, parent_id)),
                                                Play("audio", "se/sounds/open.ogg")]
                                               ]
@@ -1441,19 +1465,19 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
     python:
         from modloader.modconfig import apply_mod_changes
 
-        mods_to_install = mod_changes.get_added_mods()
-        mods_added_to_install = dict(mods_to_install)
-        mod_deps_to_install = mod_changes.get_added_dependencies(missing=True)
-        for mod_id in mod_deps_to_install:
-            if mod_id in mods_added_to_install:
-                del mods_added_to_install[mod_id]
-        mods_to_uninstall = mod_changes.get_removed_mods()
-        overridden_mods = dict(mod_changes.get_removed_mods(dependency=False))
-        for mod_id in mods_to_uninstall:
-            if mod_id in overridden_mods:
-                del overridden_mods[mod_id]
-        n_mods_to_install = len(mods_to_install)
-        n_mods_to_uninstall = len(mods_to_uninstall)
+        full_mods_to_add = mod_changes.get_added_mods(dependency=True)
+        selected_mods_to_remove = mod_changes.get_removed_mods(dependency=False)
+
+        selected_mods_to_add = mod_changes.get_added_mods(dependency=False)
+        selected_mod_deps = full_mods_to_add - selected_mods_to_add
+        removable_mods_to_remove = mod_changes.get_removed_mods(dependency=True)
+        overridden_mods = selected_mods_to_remove - removable_mods_to_remove
+
+        modmap_to_install = mod_changes.get_add_modmap()
+        modmap_to_uninstall = mod_changes.get_remove_modmap()
+
+        n_mods_to_install = len(modmap_to_install)
+        n_mods_to_uninstall = len(modmap_to_uninstall)
 
     window id "modmenu_apply_confirm" at alpha_dissolve:
         add "#22589a"
@@ -1502,7 +1526,8 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
                             spacing 5
                             xfill True
 
-                            for mod_id, mod_name in mods_added_to_install.iteritems():
+                            for mod_id in selected_mods_to_add:
+                                $ mod_name = mod_changes.get_mod_name(mod_id)
                                 hbox:
                                     spacing 20
                                     ysize 60
@@ -1512,7 +1537,7 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
                                         hover "image/ui/close_hover.png"
                                         yalign 0.5
 
-                                        action Function(mod_changes.remove_mod, mod_id) # As mod is guaranteed to be in the add list, we only need id to remove.
+                                        action Function(mod_changes.remove_mod, mod_id)
 
                                     text mod_name:
                                         if len(mod_name) > 30:
@@ -1520,13 +1545,14 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
                                         xfill True
                                         ysize 60
 
-                            if mod_deps_to_install:
+                            if selected_mod_deps:
                                 null height 5
                                 text "Including these dependencies:":
                                     size 50
                                 null height 10
 
-                                for mod_name in mod_deps_to_install.itervalues():
+                                for mod_id in selected_mod_deps:
+                                    $ mod_name = mod_changes.get_mod_name(mod_id)
                                     hbox:
                                         spacing 20
                                         ysize 60
@@ -1563,7 +1589,8 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
                         vbox:
                             spacing 5
                             xfill True
-                            for mod_id, (mod_name, _) in mods_to_uninstall.iteritems():
+                            for mod_id in removable_mods_to_remove:
+                                $ mod_name = mod_changes.get_mod_name(mod_id)
                                 hbox:
                                     spacing 20
                                     ysize 60
@@ -1582,7 +1609,7 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
 
 
                             if overridden_mods:
-                                if not mods_to_uninstall:
+                                if not n_mods_to_uninstall:
                                     text "---":
                                         xfill True
                                         ysize 60
@@ -1591,7 +1618,8 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
                                     size 50
                                 null height 10
 
-                                for mod_id, (mod_name, _) in overridden_mods.iteritems():
+                                for mod_id in overridden_mods:
+                                    $ mod_name = mod_changes.get_mod_name(mod_id)
                                     hbox:
                                         spacing 20
                                         ysize 60
@@ -1642,7 +1670,7 @@ screen modmenu_apply_confirm(mod_changes, use_steam):
                 ycenter 0.5
                 xsize 425
                 ysize 125
-                action [Function(apply_mod_changes, add_modmap=mods_to_install, remove_modmap=mods_to_uninstall, show_status_screen=True, reload_script=True, use_steam=use_steam),]
+                action [Function(apply_mod_changes, add_modmap=modmap_to_install, remove_modmap=modmap_to_uninstall, show_status_screen=True, reload_script=True, use_steam=use_steam),]
                 sensitive bool(n_mods_to_install) or bool(n_mods_to_uninstall)
 
 
