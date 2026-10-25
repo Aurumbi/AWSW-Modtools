@@ -265,11 +265,8 @@ class CachedSteamMgr:
                 cb.page_complete.set()
                 return
             
-            # child_nums = {}
-            
             for x in range(arr_len):
                 item = array[x]
-                # child_nums[item.m_nPublishedFileId] = item.m_pvecChildrenId
                 if get_all:
                     results.append(copy.deepcopy((item.m_nPublishedFileId, item.m_eResult, item.m_eFileType,
                                                   item.m_nCreatorAppID, item.m_nConsumerAppID, item.m_rgchTitle,

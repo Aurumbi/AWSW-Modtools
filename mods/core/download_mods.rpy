@@ -444,15 +444,14 @@ init python:
                 passed = True
                 for name, status in self._filter_activity.iteritems():
                     if status is not None:
-                        fulter_func, add_args = self._filter_funcs[name]
-                        if fulter_func(entry, add_args) != status:
+                        filter_func, add_args = self._filter_funcs[name]
+                        if filter_func(entry, add_args) != status:
                             passed = False
                             break
                 if passed:
                     result_contents.append(entry)
 
             self._filtered_modlist = result_contents
-#             _refresh_modlist(self, self.use_steam)
 
     def _modmenu_do_then_refresh(func, modlist_manager, mod_changes, use_steam):
         """A wrapper which calls func and then refreshes the modlist display. necessary for searchbars, as they don't accept Actions"""
