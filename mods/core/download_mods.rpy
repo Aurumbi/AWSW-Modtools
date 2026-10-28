@@ -738,13 +738,13 @@ init -1 python:
             :param dependency: if False (default), ignore dependency install for this calculation. if True, then include such case"""
             return (self.is_mod_installed(mod_id) and not self.is_mod_removed(mod_id, dependency)) or self.is_mod_added(mod_id, dependency)
 
-        def is_mod_removable(self, mod_id):
-            """Can a mod be removed without breaking dependency constraints. this decides if a remove_mod call will produce a visible effect"""
-            return mod_id not in self._installed_dependency_counts and mod_id not in self._requested_add_dependency_counts
-
         def is_mod_dependency(self, mod_id):
             """Is this mod a dependency of a present mod. semantically equivalent to not self.is_mod_removable(mod_id)"""
-            return not self.is_mod_removable(mod_id)
+            return mod_id in self._installed_dependency_counts or mod_id in self._requested_add_dependency_counts
+
+        def is_mod_removable(self, mod_id):
+            """Can a mod be removed without breaking dependency constraints. this decides if a remove_mod call will produce a visible effect"""
+            return not self.is_mod_dependency(mod_id) and self.is_mod_installed(mod_id)
 
 
         def add_mod(self, mod_id):
