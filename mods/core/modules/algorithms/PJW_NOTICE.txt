@@ -1,0 +1,15 @@
+This is a copy of the notice of the pseudo jaro winkler repo (<https://github.com/ipums/pseudo_jaro_winkler>), as is required under section 3. Responsibilities
+It is only relevant for the contents of the 'algorithms' directory this file is located in, as those files are the ones that are related to that.
+See ./PJW_LICENSE.txt for the licensing information.
+
+pseudo_jaro_winkler
+https://github.com/ipums/pseudo_jaro_winkler
+
+Copyright 2021 Regents of the University of Minnesota
+
+Contributors:
+  Jacob Wellington, IPUMS, University of Minnesota
+
+This project (referring to the pseudo jaro winkler repo) is licensed under the Mozilla Public License, version 2.0 (the
+"License"). A copy of the License is in the project file "LICENSE.txt",
+and is also available at https://www.mozilla.org/en-US/MPL/2.0/.
