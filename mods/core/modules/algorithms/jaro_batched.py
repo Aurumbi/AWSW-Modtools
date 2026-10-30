@@ -14,39 +14,43 @@ As such it is under the terms of their license, available both as a local copy h
 See ./PJW_LICENSE.txt for the licensing information, along with ./PJW_NOTICE.txt for their notice information.
 """
 
+# 31 characters have been chosen as it fits in a 32 bit integer and is odd,
+# Which allows the symmetric blocks of ones in _build_query_masks to extend simply using the central bit.
+# Additionally, it should significantly longer than any word anyone is likely to want to search.
+# If people start searching 40 character words, we may want to grow this to 63...
+MAX_WORD_SIZE = 31
+
 
 def _build_query_masks(query):
     """ Create list of (letter, mask_list) pairs for each character in query.
-    mask_list is a list of length 31,
+    mask_list is a list of length MAX_WORD_SIZE (31),
      where each mask is all positions that jaro logic can match the current letter to it given the candidate is of length i+1.
-    example, for mask list size 5 (as I can't practically do size 31):
+    example, for mask list size 5 (as I can't practically do size 31...):
       "aba" -> [("a", [0b00001, 0b00001, 0b00001, 0b00011, 0b00011,]),
                 ("b", [0b00010, 0b00010, 0b00010, 0b00111, 0b00111,]),
                 ("a", [0b00100, 0b00100, 0b00100, 0b01110, 0b01110,]),]
     """
     result = []
     
+    _HALF_MAX_WORD_SIZE = MAX_WORD_SIZE / 2
+    
     for letter in query:
         result.append((letter, []))
     
     min_shift_dist = max(int(len(query) / 2), 1) - 1
-    for cand_size in range(1, 32):
+    for cand_size in range(1, MAX_WORD_SIZE + 1):
         shift_dist = max(int(cand_size / 2) - 1, min_shift_dist)
         
-        # Create symmetric block of ones, centered at bit 15, extending shift_dist bits in each direction
-        # Bit 15 is chosen as we decided (relatedly) to limit words to 31 characters,
-        #  and under that choice bit 15 is the centermost bit of the 31 bit mask.
-        # 31 characters have been chosen as it fits in a 32 bit integer and is odd.
-        # oddness is required for there to be a center bit, as we rely on one here.
-        base_bitmask = ((0x1 << (2 * shift_dist + 1)) - 1) << (15 - shift_dist)
+        # Create symmetric block of ones, centered at bit 15 (MAX_WORD_SIZE / 2), extending shift_dist bits in each direction
+        # Bit 15 is chosen as we decided (relatedly) to limit words to 31 (MAX_WORD_SIZE) characters,
+        #  and under that choice bit 15 is the centermost bit of the MAX_WORD_SIZE bit mask.
+        base_bitmask = ((0x1 << (2 * shift_dist + 1)) - 1) << (_HALF_MAX_WORD_SIZE - shift_dist)
         
         for letter_pos, letter in enumerate(query):
-            if letter_pos < 15:
-                bitmask = base_bitmask >> (15 - letter_pos)
+            if letter_pos < _HALF_MAX_WORD_SIZE:
+                bitmask = base_bitmask >> (_HALF_MAX_WORD_SIZE - letter_pos)
             else:
-                # First cutoff then shift to ensure everything stays within 31 bits
-                bitmask = (0x7FFFFFFF >> (letter_pos - 15)) & base_bitmask
-                bitmask = bitmask << (letter_pos - 15)
+                bitmask = base_bitmask << (letter_pos - _HALF_MAX_WORD_SIZE)
             
             result[letter_pos][1].append(bitmask)
     
@@ -69,8 +73,7 @@ def _update_score_on_next_masks(candidate_scorer, query_mask, candidate_mask):
     """
     whole_mask_result = query_mask & candidate_mask  # Get raw matches
     check_used_result = whole_mask_result & ~candidate_scorer["used"]  # Make sure we haven't used that match before
-    mask_result = (0x1 << _count_trailing_zeroes(
-        check_used_result)) & check_used_result  # Checking one char at a time, so prefer first match
+    mask_result = (0x1 << _count_trailing_zeroes(check_used_result)) & check_used_result  # Checking one char at a time, so prefer first match
     is_match = int(mask_result != 0)
     candidate_scorer["matches"] += is_match
     candidate_scorer["transpositions"] += mask_result and (mask_result - 1 < candidate_scorer["used"])
@@ -108,7 +111,11 @@ def calculate_jaro_score(matches, transpositions, length_1, length_2):
     # it is inherited from the calculate_jaro_winkler from the pseudo jaro winkler repo, and I didn't want to remove it if I don't understand it.
     # It seems to work, though!
     transpositions = transpositions - int(transpositions > matches / 2)
-    return ((float(matches) / length_1) + (float(matches) / length_2) + 1.0 - (transpositions / float(matches))) / 3.0
+    
+    return (((float(matches) / length_1)
+            + (float(matches) / length_2)
+            + 1.0 - (transpositions / float(matches))) # 1 - t/m = (m-t)/m  With less work
+            / 3.0)
 
 
 def jaro_using_wl_lookup(query, words, wl_lookup):
@@ -125,5 +132,4 @@ def jaro_using_wl_lookup(query, words, wl_lookup):
             _update_score_on_next_masks(inter_scores[word], curr_query_mask, curr_word_info["mask"])
     
     query_len = len(query)
-    return {word: calculate_jaro_score(scorer["matches"], scorer["transpositions"], len(word), query_len)
-            for word, scorer in inter_scores.iteritems()}
+    return {word: calculate_jaro_score(scorer["matches"], scorer["transpositions"], len(word), query_len) for word, scorer in inter_scores.iteritems()}

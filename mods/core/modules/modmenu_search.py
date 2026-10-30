@@ -1,94 +1,77 @@
-from algorithms.search import jaro_similarity
+from algorithms.jaro_batched import build_word_letter_lookup, jaro_using_wl_lookup, MAX_WORD_SIZE
 
-_jaro_best_match_cache = {}
 
-def jaro_set_similarity(query_set, target1, target2):
-    """Finds approximate similarity between word set query_set and target word strings target1 and target2.
-    each word in query_set is compared against all of target1's and target2's words to find the best match.
-    the similarity is then the average of each of those best similarity numbers.
-    these results are cached by target1 for each word of query_set, and as such, for each value of target1 there should only be a single value of target2."""
+def _get_words(string):
+    return set(string.lower().split())
+
+
+class BatchedJaroSearchManager:
+    def __init__(self, modlist):
+        self._modlist = modlist
+        self._mods_by_id = {mod.id: mod for mod in self._modlist}
+        
+        word_list = set()
+        for mod in modlist:
+            word_list.update(_get_words(mod.name) | _get_words(mod.desc))
+        
+        # Note the difference in handling long words vs long author names now that there's a limit.
+        # Long words are not really supposed to be searched as the main searchbox is quite small and generally uses multiple,
+        #   so they can safely be ignored.
+        # Author names may be of any length and need to be searchable. Additionally you generally only search for one at a time.
+        #   therefore we decide to truncate them, so that they'll still be easy to search.
+        self._word_list = {word for word in word_list if len(word) <= MAX_WORD_SIZE}
+        self._author_list = {mod.author[:MAX_WORD_SIZE] for mod in modlist}
+        self._wl_lookup = build_word_letter_lookup(words=self._word_list)
+        self._author_wl_lookup = build_word_letter_lookup(words=self._author_list)
     
-    best_similarity_1 = {}
-    best_similarity_2 = {}
-    for query_word in query_set:
-        if (query_word, target1) not in _jaro_best_match_cache:
-            t1_word_set = set(target1.lower().split())
-            curr_best_1 = 0
-            for target_word in t1_word_set:
-                curr_best_1 = max(curr_best_1, jaro_similarity(query_word, target_word))
-            best_similarity_1[query_word] = curr_best_1
+    
+    def sort_best(self, query, author_query="", return_score=False):
+        """ Sort mods by best match to query.
+        Ensure that the parameter word_list to this classes' __init__ contains all words """
+        query_words = {word for word in _get_words(query) if len(word) <= MAX_WORD_SIZE}
+        author_query = author_query.strip()[:MAX_WORD_SIZE]
+        
+        per_word_scores = {word: jaro_using_wl_lookup(query=word, words=self._word_list, wl_lookup=self._wl_lookup) for word in query_words}
+        
+        per_author_scores = jaro_using_wl_lookup(query=author_query, words=self._author_list, wl_lookup=self._author_wl_lookup)
+        
+        query_scores = {}
+        author_scores = {}
+        for mod in self._modlist:
+            if query_words:
+                name_words = _get_words(mod.name)
+                desc_words = _get_words(mod.desc)
+                name_similarity = 0
+                desc_similarity = 0
+                
+                for query_word in query_words:
+                    name_similarity += max(per_word_scores[query_word].get(test_word) for test_word in name_words)
+                    desc_similarity += max(per_word_scores[query_word].get(test_word) for test_word in desc_words)
+                
+                name_similarity /= len(query_words)
+                desc_similarity /= len(query_words)
+                
+                query_scores[mod.id] = (name_similarity, desc_similarity)
+            else:
+                query_scores[mod.id] = (0.0, 0.0)
             
-            t2_word_set = set(target2.lower().split())
-            curr_best_2 = 0
-            for target_word in t2_word_set:
-                curr_best_2 = max(curr_best_2, jaro_similarity(query_word, target_word))
-            best_similarity_2[query_word] = curr_best_2
-            
-            _jaro_best_match_cache[(query_word, target1)] = (curr_best_1, curr_best_2)
+            if author_query:
+                author_scores[mod.id] = per_author_scores[mod.author]
+            else:
+                author_scores[mod.id] = 0.0
+        
+        similarities = {mod_id: scores + (author_scores[mod_id],) for mod_id, scores in query_scores.iteritems()}  # Much easier to deal with if it's a single iterable
+        # Sort by best match, with bias to strong modname matches and strong authorname matches
+        #  This bias is useful as the description normally takes the stronger value, unless the mod name is searched specifically.
+        #  Max gave me better results than sum, so I used it.
+        comp_func = lambda e: (max(e[1][:2]) + (int(e[1][0] > 0.9) * e[1][0]) + (int(e[1][2] > 0.7) * e[1][2]))
+        mod_order = list(sorted(similarities.items(), key=comp_func, reverse=True))
+        
+        if comp_func(mod_order[0]) <= 0.3:  # All bad matches, don't reorder
+            print "No good matches. reordering suppressed"
+            mod_order = list((mod.id, 0.0) for mod in self._modlist)
+        
+        if return_score:
+            return [(self._mods_by_id[mod_id], score) for mod_id, score in mod_order]
         else:
-            sim1, sim2 = _jaro_best_match_cache[(query_word, target1)]
-            best_similarity_1[query_word] = sim1
-            best_similarity_2[query_word] = sim2
-    
-    n_values = len(query_set)
-    return (sum(best_similarity_1[query_word] for query_word in query_set) / n_values,
-            sum(best_similarity_2[query_word] for query_word in query_set) / n_values)
-
-
-def jaro_split_compare(query, modlist):
-    """Compare the modlist to the query using jaro similarity on each word.
-    :returns dict from modname to similarity tuple, which contains the similarity of query to modname, then the similarity of query to mod description.
-    """
-    comps = {}
-    query_words = set(query.lower().split())
-    
-    for mod in modlist:
-        comps[mod.name] = jaro_set_similarity(query_words, mod.name, mod.desc)
-    
-    return comps
-
-
-def jaro_author_compare(author_query, modlist):
-    comps = {}
-    author_query = author_query.lower()
-    
-    for mod in modlist:
-        comps[mod.name] = jaro_similarity(author_query, mod.author.lower())
-    
-    return comps
-
-
-def sort_best(query, modlist, author_query="", return_score=False):
-    """Sort mods by best match to query"""
-    if query.strip():
-        similarities = jaro_split_compare(query, modlist)
-    else:
-        similarities = {mod.name: (0.0, 0.0) for mod in modlist}
-    if author_query.strip():
-        author_similarities = jaro_author_compare(author_query, modlist)
-    else:
-        author_similarities = {name: 0.0 for name in similarities.iterkeys()}
-    similarities = {name: scores + (author_similarities[name],) for name, scores in
-                    similarities.iteritems()}  # Much easier to deal with if it's a single iterable
-    
-    # Sort by best match, with bias to strong modname matches and strong authorname matches
-    #  This bias is useful as the description normally takes the stronger value, unless the mod name is searched specifically.
-    #  Max gave me better results than sum, so I used it.
-    comp_func = lambda e: (max(e[1][:2]) + (int(e[1][0] > 0.9) * e[1][0]) + (int(e[1][2] > 0.7) * e[1][2]))
-    mod_order = list(sorted(similarities.items(), key=comp_func, reverse=True))
-    
-    if comp_func(mod_order[0]) <= 0.3:  # All bad matches, don't reorder
-        print "No good matches. reordering suppressed"
-        mod_order = list((mod.name, 0.0) for mod in modlist)
-    
-    mods_by_name = {mod[1]: mod for mod in modlist}
-    
-    if return_score:
-        return [(mods_by_name[name], score) for name, score in mod_order]
-    else:
-        return [mods_by_name[name] for name, _ in mod_order]
-
-
-def clear_cache():
-    _jaro_best_match_cache.clear()
-    jaro_similarity.clear_cache()
+            return [self._mods_by_id[mod_id] for mod_id, _ in mod_order]

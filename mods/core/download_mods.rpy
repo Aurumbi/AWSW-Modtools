@@ -348,6 +348,8 @@ init python:
             self._filter_funcs = filter_map
             self._filter_activity = {name: None for name in filter_map.iterkeys()}
 
+            self._search_manager = modmenu_search.BatchedJaroSearchManager(modlist)
+
             self.use_steam = use_steam
 
         def get_current_page(self):
@@ -431,7 +433,7 @@ init python:
             """apply the new search to the modlist"""
             s_time = time.time()
             if self._query.strip() or self._author_query.strip(): # There's no reason to reorder the modlist if no search has been done.
-                self._reordered_modlist = modmenu_search.sort_best(self._query, self.get_base_modlist(), author_query=self._author_query)
+                self._reordered_modlist = self._search_manager.sort_best(self._query, author_query=self._author_query)
             else:
                 self._reordered_modlist = self.get_base_modlist()
             print "Search took: {:.5}".format(time.time() - s_time) # Hopefully this never goes above 0.3
@@ -1083,7 +1085,6 @@ screen modmenu_paged(contents, use_steam):
 
     on "hide" action [Function(mod_image_preloader.clear), # Cleanup after ourselves
                       Function(im.cache.clear),
-                      Function(modmenu_search.clear_cache),
                       Function(mod_changes.clear_mods),
                      ]
 
