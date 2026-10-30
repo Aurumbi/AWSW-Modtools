@@ -1,1 +1,1 @@
-import search # Load bearing __init__ file... as else the imports are not recognised
+import jaro_batched # Load bearing __init__ file... as else the imports are not recognised
